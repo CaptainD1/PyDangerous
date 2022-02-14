@@ -1,13 +1,19 @@
-from ast import Call
 import time
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Union
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-from structures.events import EliteEvent
+from structures.events import EliteEvent, ScanEvent
+from structures.exploration.bodies import System, Planet
+
+def test_scan_event(event: ScanEvent, output: set):
+    if type(event.body) == Planet:
+        body: Planet = event.body
+        if body.efficient_mapped_value > 200_000:
+            output.add(body)
 
 def main():
     now = datetime.utcnow().replace(tzinfo=timezone.utc)
@@ -16,11 +22,18 @@ def main():
 
     event_handler = EliteAPI()
 
-    event_handler.bind("scan", lambda event: print(event.json))
+    output = set()
 
-    event_handler.start()
+    event_handler.bind(ScanEvent, lambda event: test_scan_event(event, output))
 
-    while True:
+    systems = System.get_all_systems()
+
+    event_handler.start(rescan=True)
+
+    for body in output:
+        print(f"{body.name} - Type: {body.planet_class}, Value: {body.efficient_mapped_value}")
+
+    while False:
         try:
             time.sleep(1)
         except KeyboardInterrupt:
@@ -43,6 +56,8 @@ class EliteAPI:
         self._bound_events = {}
         self._observer = None
 
+        self.bind("scan", System.from_body_data)
+
     def __del__(self):
         self.stop()
 
@@ -60,14 +75,16 @@ class EliteAPI:
         if Path(self._journal_file.name).samefile(event.src_path):
             self.update_events()
 
-    def bind(self, event_name: str, callback: Callable):
-        event_name = event_name.lower()
+    def bind(self, event_name: Union[str,type], callback: Callable):
+        if type(event_name) == str:
+            event_name = event_name.lower()
         if event_name not in self._bound_events:
             self._bound_events[event_name] = set()
         self._bound_events[event_name].add(callback)
 
-    def unbind(self, event_name: str, callback: Callable):
-        event_name = event_name.lower()
+    def unbind(self, event_name: Union[str,type], callback: Callable):
+        if type(event_name) == str:
+            event_name = event_name.lower()
         if event_name in self._bound_events and callback in self._bound_events[event_name]:
             self._bound_events[event_name].remove(callback)
 
@@ -77,9 +94,12 @@ class EliteAPI:
         self._journal_file = journal_file_path.open("rt")
         print("Journal file:", journal_file_path)
 
-    def start(self):
+    def start(self, rescan = False):
         self.set_journal(self.get_latest_journal())
-        self._journal_file.seek(0, 2)
+        if rescan:
+            self.update_events()
+        else:
+            self._journal_file.seek(0, 2)
 
         self._observer = Observer()
         self._observer.schedule(self.JournalUpdateEventHandler(self), self._journal_directory)
@@ -103,8 +123,7 @@ class EliteAPI:
         while line:
             try:
                 data = json.loads(line)
-                event = EliteEvent(data)
-                self.invoke(event)
+                self.create_event(data)
             except json.JSONDecodeError:
                 print("Error: Invalid json in log")
                 continue
@@ -115,6 +134,17 @@ class EliteAPI:
         if event.name in self._bound_events:
             for callback in self._bound_events[event.name]:
                 callback(event)
+        if type(event) in self._bound_events:
+            for callback in self._bound_events[type(event)]:
+                callback(event)
+
+    def create_event(self, data):
+        if data["event"] == "Scan":
+            event = ScanEvent(self, data)
+        else:
+            event = EliteEvent(self, data)
+        
+        self.invoke(event)
 
 if __name__ == "__main__":
     main()
